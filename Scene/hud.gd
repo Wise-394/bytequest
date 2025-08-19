@@ -11,7 +11,7 @@ func process_code():
 	
 	if code_text != "":
 		code_executed.emit(code_text)
-		message_label.text = "Code sent!"
+		message_label.text = "Code run!"
 	else:
 		message_label.text = "Error: No code entered."
 

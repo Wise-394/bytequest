@@ -1,151 +1,215 @@
 extends Area2D
 
-# --- Member Variables ---
+# --- Node References ---
+@onready var execution_timer = $ExecutionTimer
 
-# A dictionary to map command strings to function names.
+# --- Core Interpreter Data ---
 var command_map = {
 	"move": "move_in_direction",
 	"turn_left": "turn_left",
 	"turn_right": "turn_right"
 }
 
-# The queue to hold commands for the interpreter to execute.
 var command_queue = []
-
-# State flag to prevent new commands from being processed while busy.
+var pc = 0 # The Program Counter
+var call_stack = [] # The new call stack
 var is_executing = false
 
-# Player's current grid position, used for calculations.
-var currentPos = Vector2(0, 0)
-# Size of a single grid cell in pixels.
+# --- Character State ---
+var current_grid_pos = Vector2.ZERO
 var grid_size = 32
-
-# An array to represent directions: Right, Down, Left, Up.
 var directions = [
 	Vector2(1, 0), # Right
 	Vector2(0, 1), # Down
 	Vector2(-1, 0), # Left
-	Vector2(0, -1)  # Up
+	Vector2(0, -1) # Up
 ]
-# The current facing direction.
-var current_direction = 0
+var current_direction_index = 0
 
-# The Timer node is essential for step-by-step execution.
-@onready var execution_timer = $ExecutionTimer
-
-
-# --- Interpreter and Execution Logic ---
-
-# Called by the UI's `code_executed` signal. This is the main entry point.
+# --- Entry Point ---
 func _on_hud_code_executed(code_text: String) -> void:
-	# Stop any running execution before starting a new one.
 	stop_execution()
-	command_queue.clear()
-	
-	# Split the input code into individual lines.
-	var lines = code_text.split("\n", false)
-	
-	# Parse each line and add it to the command queue.
-	for line in lines:
-		var parsed_command = parse_command(line)
-		if parsed_command:
-			command_queue.append(parsed_command)
-		else:
-			print("Interpreter Error: Invalid command on line: " + line)
-			# Stop parsing if an invalid command is found.
-			command_queue.clear()
-			return
-	
-	# Start execution if the queue is not empty.
-	if not command_queue.is_empty():
+	var parsed_commands = parse_code(code_text)
+	if not parsed_commands.is_empty():
+		command_queue = parsed_commands
 		start_execution()
 
-# Called by the Timer to execute the next command in the queue.
-func _on_execution_timer_timeout():
-	if not command_queue.is_empty():
-		# Get the next command data from the front of the queue.
-		var command_data = command_queue.pop_front()
-		
-		# Find the function to call based on the command name.
-		var function_to_call = command_map[command_data.name]
-		
-		# Execute the function with its arguments.
-		callv(function_to_call, command_data.args)
-		
-		# Restart the timer for the next command.
-		execution_timer.start()
-	else:
-		# All commands have been executed.
-		stop_execution()
-		print("Execution finished!")
+# --- Parsing ---
+func parse_code(code_text: String) -> Array:
+	var queue_to_parse = []
+	var parsing_stack = []
+	var lines = code_text.split("\n", false)
 
+	for line in lines:
+		var parsed_command = parse_single_line(line)
+		if parsed_command == null:
+			print("Interpreter Error: Invalid command on line: " + line)
+			return []
 
-# --- Command Parsing ---
+		var cmd_name = parsed_command["name"]
 
-# Parses a single line of code into a command name and arguments.
-func parse_command(line):
-	var clean_line = line.strip_edges()
-	if clean_line == "":
-		return null
-	
-	var open_paren_pos = clean_line.find("(")
-	var close_paren_pos = clean_line.find(")")
-	
-	# Handle commands with or without parentheses.
-	if open_paren_pos == -1 or close_paren_pos == -1 or open_paren_pos > close_paren_pos:
-		if command_map.has(clean_line):
-			return { "name": clean_line, "args": [] }
+		if cmd_name == "for":
+			parsing_stack.append({ "count": parsed_command["args"][0], "body": [] })
+		elif cmd_name == "end_loop":
+			if parsing_stack.is_empty():
+				print("Interpreter Error: 'end_loop' without matching 'for'")
+				return []
+			var loop = parsing_stack.pop_back()
+			var loop_command = { "name": "loop", "args": [loop["count"], loop["body"]] }
+			if not parsing_stack.is_empty():
+				parsing_stack.back()["body"].append(loop_command)
+			else:
+				queue_to_parse.append(loop_command)
 		else:
-			return null
-	
-	# Extract command name from the string.
+			if not parsing_stack.is_empty():
+				parsing_stack.back()["body"].append(parsed_command)
+			else:
+				queue_to_parse.append(parsed_command)
+
+	if not parsing_stack.is_empty():
+		print("Interpreter Error: Mismatched 'for' and 'end_loop'")
+		return []
+
+	return queue_to_parse
+
+func parse_single_line(line: String):
+	var clean_line = line.strip_edges()
+	if clean_line.is_empty():
+		return { "name": "noop", "args": [] }
+
+	var open_paren_pos = clean_line.find("(")
+	if open_paren_pos == -1:
+		if command_map.has(clean_line) or clean_line == "end_loop":
+			return { "name": clean_line, "args": [] }
+		return null
+
+	var close_paren_pos = clean_line.find(")")
+	if close_paren_pos == -1 or close_paren_pos < open_paren_pos:
+		print("Error: Mismatched parentheses.")
+		return null
+
 	var command_name = clean_line.substr(0, open_paren_pos)
-	
-	if command_map.has(command_name):
-		var command_data = { "name": command_name, "args": [] }
-		
-		# Extract arguments from inside the parentheses.
-		var args_string = clean_line.substr(open_paren_pos + 1, close_paren_pos - (open_paren_pos + 1))
-		var args = args_string.split(",", false)
-		
-		for arg in args:
+	var args_string = clean_line.substr(open_paren_pos + 1, close_paren_pos - (open_paren_pos + 1)).strip_edges()
+
+	var args = []
+	if not args_string.is_empty():
+		var arg_parts = args_string.split(",", false)
+		for arg in arg_parts:
 			var arg_clean = arg.strip_edges()
-			if arg_clean != "":
-				# Convert the string argument to an integer.
-				command_data.args.append(int(arg_clean))
-		return command_data
-	
+			if not arg_clean.is_empty():
+				if not arg_clean.is_valid_int():
+					print("Error: Arguments must be integers.")
+					return null
+				args.append(int(arg_clean))
+
+	if command_name == "for" and args.size() != 1:
+		print("Error: 'for' expects exactly one argument")
+		return null
+
+	if command_map.has(command_name) or command_name == "for":
+		return { "name": command_name, "args": args }
+	if command_name == "end_loop":
+		return { "name": "end_loop", "args": [] }
+
 	return null
 
+# --- Execution ---
+func _on_execution_timer_timeout():
+	if not is_executing:
+		return
+	
+	# Handle end of the current frame
+	var current_commands = command_queue
+	if not call_stack.is_empty():
+		var current_frame = call_stack.back()
+		current_commands = current_frame.body
 
-# --- Control Functions ---
+		if pc >= current_commands.size():
+			if current_frame.frame_type == "loop":
+				current_frame.remaining_count -= 1
+				if current_frame.remaining_count > 0:
+					pc = 0 # Loop another time
+				else:
+					call_stack.pop_back() # Loop is finished
+					if not call_stack.is_empty():
+						var parent_frame = call_stack.back()
+						pc = parent_frame.return_pc + 1
+					else:
+						pc = current_frame.return_pc + 1
+			
+			if not is_executing:
+				return
+			
+			execution_timer.start()
+			return
+		
+	# Handle end of main program
+	if call_stack.is_empty() and pc >= command_queue.size():
+		stop_execution()
+		return
+		
+	var command_data = current_commands[pc]
+	var cmd_name = command_data["name"]
+	var cmd_args = command_data["args"]
 
-# Starts the interpreter's execution timer.
-func start_execution():
-	is_executing = true
+	if cmd_name == "noop":
+		pc += 1
+	elif cmd_name == "loop":
+		start_new_loop(cmd_args, pc)
+		pc = 0 # Reset PC to start of the loop body.
+	else:
+		execute_command(cmd_name, cmd_args)
+		pc += 1
+	
 	execution_timer.start()
 
-# Stops the interpreter and resets the state.
+func start_new_loop(loop_args: Array, return_pc: int):
+	var loop_count = loop_args[0]
+	var loop_body = loop_args[1].duplicate(true)
+	
+	# Push a new execution frame onto the stack
+	call_stack.append({
+		"frame_type": "loop",
+		"remaining_count": loop_count,
+		"body": loop_body,
+		"return_pc": return_pc
+	})
+
+func execute_command(cmd_name: String, cmd_args: Array):
+	var function_to_call = command_map.get(cmd_name)
+	if function_to_call:
+		if cmd_args.is_empty():
+			call(function_to_call)
+		else:
+			callv(function_to_call, cmd_args)
+	else:
+		print("Interpreter Error: Unknown command:", cmd_name)
+
+func start_execution():
+	is_executing = true
+	pc = 0
+	call_stack.clear()
+	execution_timer.start()
+
 func stop_execution():
 	is_executing = false
 	execution_timer.stop()
-
+	command_queue.clear()
+	pc = 0
+	call_stack.clear()
+	print("Execution finished!")
 
 # --- Command Functions ---
-
-# Moves the character one grid unit in its current facing direction.
 func move_in_direction():
-	var direction_vector = directions[current_direction]
-	currentPos += direction_vector
-	position = Vector2(currentPos.x * grid_size, currentPos.y * grid_size)
-	print("Character moved!")
-	
-# Rotates the character's facing direction to the right.
+	var direction_vector = directions[current_direction_index]
+	current_grid_pos += direction_vector
+	position = current_grid_pos * grid_size
+	print("Character moved to: ", current_grid_pos)
+
 func turn_right():
-	current_direction = (current_direction + 1) % 4
+	current_direction_index = (current_direction_index + 1) % 4
 	print("Character turned right!")
 
-# Rotates the character's facing direction to the left.
 func turn_left():
-	current_direction = (current_direction - 1 + 4) % 4
+	current_direction_index = (current_direction_index - 1 + 4) % 4
 	print("Character turned left!")
