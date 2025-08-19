@@ -1,0 +1,5 @@
+res://Scene/main.tscn
+res://Scene/Player.tscn
+res://Scene/player.gd
+res://Scene/HUD.tscn
+res://Scene/hud.gd

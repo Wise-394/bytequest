@@ -1,2 +1,11 @@
+Timer
+Label
+Button
+CodeEdit
+CanvasLayer
+CollisionShape2D
+AnimatedSprite2D
+Area2D
+Camera2D
 TileMapLayer
 Node
